@@ -370,3 +370,12 @@ def test_count_pulses_rejects_a_negative_interval(mocker):
     with pytest.raises(ValueError):
         la.count_pulses("LA2", -0.2)
     assert not capture.called
+
+
+def test_count_pulses_across_a_counter_rollover(mocker):
+    la = LogicAnalyzer(FakeDevice())
+    # Same 100 kHz signal, but the second event is seen after the 32-bit
+    # capture counter has wrapped.
+    wrap = 2**32 / CP.CLOCK_RATE * 1e6
+    mocker.patch.object(la, "capture", return_value=[np.array([wrap - 80, 80])])
+    assert la.count_pulses("LA2", 0.2) == FREQUENCY * 0.2

@@ -759,7 +759,12 @@ class LogicAnalyzer(ADCBufferMixin):
         try:
             # Sixteen rising edges are captured, so the time between two
             # captured events covers 16 periods of the signal.
-            period = (timestamps[1] - timestamps[0]) * 1e-6 / 16
+            delta = timestamps[1] - timestamps[0]
+            if delta < 0:
+                # The capture counter is 32 bits and wraps after 67 seconds,
+                # so the difference has to be taken modulo its range.
+                delta += 2**32 / CP.CLOCK_RATE * 1e6
+            period = delta * 1e-6 / 16
         except IndexError:
             return 0
 
