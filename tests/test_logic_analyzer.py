@@ -16,6 +16,7 @@ import pytest
 
 import pslab.protocol as CP
 from pslab.instrument.logic_analyzer import LogicAnalyzer
+from pslab.instrument.oscilloscope import Oscilloscope
 from pslab.instrument.waveform_generator import PWMGenerator
 
 EVENTS = 2495
@@ -281,7 +282,7 @@ def test_count_pulses(la):
     assert expected_pulses == pytest.approx(pulses, rel=0.1)  # Pretty bad accuracy.
 
 
-# The tests below do not need a connected PSLab, since the capture is mocked.
+# The tests below use a stand-in transport and do not need a connected PSLab.
 
 
 class FakeDevice:
@@ -456,10 +457,9 @@ def test_nonblocking_pulse_capture_failure_leaves_no_pending_count(mocker):
 
 def test_another_capture_invalidates_the_pending_pulse_count(mocker):
     la = LogicAnalyzer(FakeDevice())
-    mocker.patch.object(la, "capture", return_value=None)
     la.count_pulses("LA2", block=False)
 
-    la._invalidate_buffer()
+    la.capture("LA3", events=2, block=False)
 
     with pytest.raises(RuntimeError, match="No nonblocking pulse count is active"):
         la.fetch_pulse_count()
@@ -472,3 +472,79 @@ def test_count_pulses_across_a_counter_rollover(mocker):
     wrap = 2**32 / CP.CLOCK_RATE * 1e6
     mocker.patch.object(la, "capture", return_value=[np.array([wrap - 80, 80])])
     assert la.count_pulses("LA2", 0.2) == FREQUENCY * 0.2
+
+
+@pytest.mark.parametrize("writer", ["same_analyzer", "other_analyzer", "scope"])
+@pytest.mark.parametrize("operation", ["fill", "clear", "capture"])
+def test_buffer_writers_invalidate_the_pending_pulse_count(mocker, writer, operation):
+    device = FakeDevice()
+    la = LogicAnalyzer(device)
+    la.count_pulses("LA2", block=False)
+    mocker.patch.object(la, "fetch_data", return_value=[np.array([0, 160])])
+    if writer == "same_analyzer":
+        instrument = la
+    elif writer == "other_analyzer":
+        instrument = LogicAnalyzer(device)
+    else:
+        instrument = Oscilloscope(device)
+
+    if operation == "fill":
+        instrument.fill_buffer([1, 2, 3, 4])
+    elif operation == "clear":
+        instrument.clear_buffer(4)
+    elif writer == "scope":
+        instrument.capture(1, 4, 1, block=False)
+    else:
+        instrument.capture("LA3", events=2, block=False)
+
+    with pytest.raises(RuntimeError, match="No nonblocking pulse count is active"):
+        la.fetch_pulse_count()
+
+
+@pytest.mark.parametrize(
+    "operation", ["read", "empty_fill", "empty_clear", "other_device_write"]
+)
+def test_buffer_operations_preserve_an_unmodified_pulse_capture(mocker, operation):
+    device = FakeDevice()
+    la = LogicAnalyzer(device)
+    clock = mocker.patch(
+        "pslab.instrument.logic_analyzer.time.monotonic", return_value=10
+    )
+    la.count_pulses("LA2", block=False)
+    mocker.patch.object(la, "fetch_data", return_value=[np.array([0, 160])])
+    other = LogicAnalyzer(device)
+
+    if operation == "read":
+        other.fetch_buffer(4)
+    elif operation == "empty_fill":
+        other.fill_buffer([])
+    elif operation == "empty_clear":
+        other.clear_buffer(0)
+    else:
+        LogicAnalyzer(FakeDevice()).fill_buffer([1, 2, 3, 4])
+
+    clock.return_value = 10.2
+    assert la.fetch_pulse_count() == 20000
+
+
+@pytest.mark.parametrize("operation", ["fill", "clear", "capture"])
+def test_failed_buffer_writes_invalidate_the_pending_pulse_count(mocker, operation):
+    device = FakeDevice()
+    la = LogicAnalyzer(device)
+    la.count_pulses("LA2", block=False)
+    scope = Oscilloscope(device)
+    # Bypass PGA setup so the failed ACK belongs to the buffer-writing command.
+    mocker.patch.object(scope, "_set_gain")
+    mocker.patch.object(device, "get_ack", side_effect=OSError("ack failed"))
+    mocker.patch.object(la, "fetch_data", return_value=[np.array([0, 160])])
+
+    with pytest.raises(OSError, match="ack failed"):
+        if operation == "fill":
+            scope.fill_buffer([1, 2, 3, 4])
+        elif operation == "clear":
+            scope.clear_buffer(4)
+        else:
+            scope.capture(1, 4, 1, block=False)
+
+    with pytest.raises(RuntimeError, match="No nonblocking pulse count is active"):
+        la.fetch_pulse_count()

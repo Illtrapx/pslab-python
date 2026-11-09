@@ -773,7 +773,11 @@ class LogicAnalyzer(ADCBufferMixin):
             self._channel_one_map = tmp
 
         if not block:
-            self._pulse_count_capture = (channel, started)
+            self._pulse_count_capture = (
+                channel,
+                started,
+                self._get_buffer_generation(),
+            )
             return None
 
         return self._count_pulses_from_timestamps(timestamps[0], interval)
@@ -783,8 +787,9 @@ class LogicAnalyzer(ADCBufferMixin):
 
         The estimate uses the measured period and elapsed time, not a firmware
         counter. Fetching does not wait for another event or stop the capture.
-        The signal must remain periodic, and another capture invalidates the
-        pending pulse count. This method cannot run alongside the oscilloscope.
+        The signal must remain periodic. A capture, buffer clear, or buffer fill
+        on any instrument sharing this connection invalidates the pending count.
+        This method cannot run alongside the oscilloscope.
 
         Returns
         -------
@@ -799,7 +804,11 @@ class LogicAnalyzer(ADCBufferMixin):
         if self._pulse_count_capture is None:
             raise RuntimeError("No nonblocking pulse count is active.")
 
-        channel, started = self._pulse_count_capture
+        channel, started, generation = self._pulse_count_capture
+        if generation != self._get_buffer_generation():
+            self._pulse_count_capture = None
+            raise RuntimeError("No nonblocking pulse count is active.")
+
         tmp = self._channel_one_map
         self._channel_one_map = channel
         try:
