@@ -727,7 +727,9 @@ class LogicAnalyzer(ADCBufferMixin):
         is measured by capturing logic events. This method cannot be used at the
         same time as the oscilloscope. The signal must be slow enough for the
         capture to resolve the time between two events, and fast enough for two
-        events to be captured within the timeout.
+        events to be captured within the timeout. Captures lasting a full
+        32-bit counter cycle (about 67 seconds) return 0 because the number of
+        wraps between events cannot be determined.
 
         Parameters
         ----------
@@ -780,7 +782,9 @@ class LogicAnalyzer(ADCBufferMixin):
             )
             return None
 
-        return self._count_pulses_from_timestamps(timestamps[0], interval)
+        return self._count_pulses_from_timestamps(
+            timestamps[0], interval, time.monotonic() - started
+        )
 
     def fetch_pulse_count(self) -> int:
         """Estimate pulses since starting a nonblocking pulse count.
@@ -789,7 +793,10 @@ class LogicAnalyzer(ADCBufferMixin):
         counter. Fetching does not wait for another event or stop the capture.
         The signal must remain periodic. A capture, buffer clear, or buffer fill
         on any instrument sharing this connection invalidates the pending count.
-        This method cannot run alongside the oscilloscope.
+        This method cannot run alongside the oscilloscope. Fetch within one
+        32-bit counter cycle (about 67 seconds) of starting the count; later
+        fetches return 0 because multiple counter wraps cannot be ruled out,
+        even if an earlier fetch succeeded.
 
         Returns
         -------
@@ -816,12 +823,17 @@ class LogicAnalyzer(ADCBufferMixin):
         finally:
             self._channel_one_map = tmp
 
-        return self._count_pulses_from_timestamps(
-            timestamps, time.monotonic() - started
-        )
+        elapsed = time.monotonic() - started
+        return self._count_pulses_from_timestamps(timestamps, elapsed, elapsed)
 
     @staticmethod
-    def _count_pulses_from_timestamps(timestamps: np.ndarray, interval: float) -> int:
+    def _count_pulses_from_timestamps(
+        timestamps: np.ndarray, interval: float, capture_duration: float
+    ) -> int:
+        # After a full counter cycle, even an increasing pair may hide wraps.
+        if capture_duration >= 2**32 / CP.CLOCK_RATE:
+            return 0
+
         try:
             # Sixteen rising edges are captured, so the time between two
             # captured events covers 16 periods of the signal.

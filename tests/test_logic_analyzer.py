@@ -548,3 +548,68 @@ def test_failed_buffer_writes_invalidate_the_pending_pulse_count(mocker, operati
 
     with pytest.raises(RuntimeError, match="No nonblocking pulse count is active"):
         la.fetch_pulse_count()
+
+
+@pytest.mark.parametrize("block", [False, True])
+def test_pulse_count_rejects_ambiguous_long_gap(mocker, block):
+    la = LogicAnalyzer(FakeDevice())
+    clock = mocker.patch(
+        "pslab.instrument.logic_analyzer.time.monotonic", return_value=10
+    )
+    wrap = 2**32 / CP.CLOCK_RATE
+    # A 0.1 Hz signal has 160 seconds between every 16th rising edge.
+    timestamps = np.array([1, (161 % wrap)]) * 1e6
+
+    def capture(*args, **kwargs):
+        clock.return_value = 171
+        return [timestamps] if block else None
+
+    mocker.patch.object(la, "capture", side_effect=capture)
+    mocker.patch.object(la, "fetch_data", return_value=[timestamps])
+    result = la.count_pulses("LA2", interval=161, timeout=200, block=block)
+    if not block:
+        result = la.fetch_pulse_count()
+    assert result == 0
+
+
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("offset", [-1e-6, 0, 1e-6])
+def test_pulse_count_bounds_capture_duration_not_count_interval(mocker, block, offset):
+    la = LogicAnalyzer(FakeDevice())
+    clock = mocker.patch(
+        "pslab.instrument.logic_analyzer.time.monotonic", return_value=0
+    )
+    elapsed = 2**32 / CP.CLOCK_RATE + offset
+    timestamps = np.array([100, 260])
+
+    def capture(*args, **kwargs):
+        if block:
+            clock.return_value = elapsed
+            return [timestamps]
+
+    def fetch():
+        # The duration check must include time spent retrieving timestamps.
+        clock.return_value = elapsed
+        return [timestamps]
+
+    mocker.patch.object(la, "capture", side_effect=capture)
+    mocker.patch.object(la, "fetch_data", side_effect=fetch)
+    result = la.count_pulses("LA2", interval=1000, block=block)
+    if not block:
+        result = la.fetch_pulse_count()
+    expected = round((1000 if block else elapsed) * FREQUENCY) if offset < 0 else 0
+    assert result == expected
+    assert la._channel_one_map == "LA1"
+
+
+def test_repeated_pulse_fetch_rejects_a_later_ambiguous_capture(mocker):
+    la = LogicAnalyzer(FakeDevice())
+    clock = mocker.patch(
+        "pslab.instrument.logic_analyzer.time.monotonic", return_value=0
+    )
+    la.count_pulses("LA2", block=False)
+    mocker.patch.object(la, "fetch_data", return_value=[np.array([100, 260])])
+    clock.return_value = 0.2
+    assert la.fetch_pulse_count() == 20000
+    clock.return_value = 160
+    assert la.fetch_pulse_count() == 0
