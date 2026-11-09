@@ -18,7 +18,6 @@ import pslab.protocol as CP
 from pslab.instrument.logic_analyzer import LogicAnalyzer
 from pslab.instrument.waveform_generator import PWMGenerator
 
-
 EVENTS = 2495
 FREQUENCY = 1e5
 DUTY_CYCLE = 0.5
@@ -370,6 +369,100 @@ def test_count_pulses_rejects_a_negative_interval(mocker):
     with pytest.raises(ValueError):
         la.count_pulses("LA2", -0.2)
     assert not capture.called
+
+
+@pytest.mark.parametrize("timeout", [0, 0.05, 1])
+def test_count_pulses_keeps_the_positional_timeout(mocker, timeout):
+    la = LogicAnalyzer(FakeDevice())
+    capture = mocker.patch.object(la, "capture", return_value=[np.array([0, 160])])
+
+    assert la.count_pulses("LA2", 0.2, timeout) == 20000
+    assert capture.call_args.kwargs["timeout"] == timeout
+    assert capture.call_args.kwargs["block"] is True
+
+
+def test_count_pulses_keeps_the_nonblocking_api(mocker):
+    la = LogicAnalyzer(FakeDevice())
+    capture = mocker.patch.object(la, "capture", return_value=None)
+    clock = mocker.patch(
+        "pslab.instrument.logic_analyzer.time.monotonic", return_value=10
+    )
+
+    assert la.count_pulses("LA2", 0.1, False) is None
+    assert capture.call_args.kwargs["block"] is False
+
+    fetch = mocker.patch.object(la, "fetch_data", return_value=[np.array([0, 160])])
+    clock.return_value = 10.2
+    assert la.fetch_pulse_count() == 20000
+    fetch.assert_called_once_with()
+    assert la._channel_one_map == "LA1"
+
+
+def test_nonblocking_pulse_capture_returns_before_fetching(mocker):
+    la = LogicAnalyzer(FakeDevice())
+    clock = mocker.patch(
+        "pslab.instrument.logic_analyzer.time.monotonic", return_value=10
+    )
+    fetch = mocker.patch.object(la, "fetch_data", return_value=[np.array([0, 160])])
+
+    assert la.count_pulses("LA2", block=False) is None
+    fetch.assert_not_called()
+    assert la._channel_one_map == "LA1"
+
+    def fetched_channel():
+        assert la._channel_one_map == "LA2"
+        return [np.array([0, 160])]
+
+    fetch.side_effect = fetched_channel
+    clock.return_value = 10.2
+    assert la.fetch_pulse_count() == 20000
+    clock.return_value = 10.4
+    assert la.fetch_pulse_count() == 40000
+    assert la._channel_one_map == "LA1"
+
+
+@pytest.mark.parametrize(
+    "timestamps", [np.array([]), np.array([160]), np.array([160, 160])]
+)
+def test_nonblocking_pulse_fetch_waits_for_a_measurable_period(mocker, timestamps):
+    la = LogicAnalyzer(FakeDevice())
+    mocker.patch.object(la, "capture", return_value=None)
+    la.count_pulses("LA2", block=False)
+    mocker.patch.object(la, "fetch_data", return_value=[timestamps])
+    assert la.fetch_pulse_count() == 0
+
+
+def test_nonblocking_pulse_fetch_restores_channel_map_after_error(mocker):
+    la = LogicAnalyzer(FakeDevice())
+    mocker.patch.object(la, "capture", return_value=None)
+    la.count_pulses("LA2", block=False)
+    mocker.patch.object(la, "fetch_data", side_effect=OSError("read failed"))
+    with pytest.raises(OSError, match="read failed"):
+        la.fetch_pulse_count()
+    assert la._channel_one_map == "LA1"
+
+
+def test_nonblocking_pulse_capture_failure_leaves_no_pending_count(mocker):
+    la = LogicAnalyzer(FakeDevice())
+    capture = mocker.patch.object(la, "capture", return_value=None)
+    la.count_pulses("LA2", block=False)
+    capture.side_effect = OSError("capture failed")
+    with pytest.raises(OSError, match="capture failed"):
+        la.count_pulses("LA3", block=False)
+    with pytest.raises(RuntimeError, match="No nonblocking pulse count is active"):
+        la.fetch_pulse_count()
+    assert la._channel_one_map == "LA1"
+
+
+def test_another_capture_invalidates_the_pending_pulse_count(mocker):
+    la = LogicAnalyzer(FakeDevice())
+    mocker.patch.object(la, "capture", return_value=None)
+    la.count_pulses("LA2", block=False)
+
+    la._invalidate_buffer()
+
+    with pytest.raises(RuntimeError, match="No nonblocking pulse count is active"):
+        la.fetch_pulse_count()
 
 
 def test_count_pulses_across_a_counter_rollover(mocker):

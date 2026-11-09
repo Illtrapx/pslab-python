@@ -58,6 +58,7 @@ class LogicAnalyzer(ADCBufferMixin):
         self._channel_one_map = "LA1"
         self._channel_two_map = "LA2"
         self._trimmed = 0
+        self._pulse_count_capture = None
 
     def measure_frequency(
         self, channel: str, simultaneous_oscilloscope: bool = False, timeout: float = 1
@@ -713,8 +714,13 @@ class LogicAnalyzer(ADCBufferMixin):
         }
 
     def count_pulses(
-        self, channel: str = "FRQ", interval: float = 1, timeout: float = 1
-    ) -> int:
+        self,
+        channel: str = "FRQ",
+        interval: float = 1,
+        timeout: float = 1,
+        *,
+        block: bool = True,
+    ) -> Union[int, None]:
         """Count pulses on a digital input.
 
         The number of pulses is calculated from the period of the signal, which
@@ -731,31 +737,82 @@ class LogicAnalyzer(ADCBufferMixin):
             Time in seconds during which to count pulses. The default value is
             1 second.
         timeout : float, optional
-            Timeout in seconds before cancelling the capture. The default value
-            is 1 second.
+            Timeout in seconds before cancelling a blocking capture. The default
+            value is 1 second. It does not delay a nonblocking call. A boolean
+            in this position is treated as the original API's blocking flag.
+        block : bool, optional
+            If False, return None without waiting for capture. Use
+            :meth:`fetch_pulse_count` to estimate pulses since this call; the
+            interval argument is ignored in that case. The default is True.
 
         Returns
         -------
-        int
-            Number of pulses counted during the interval, or 0 if the signal is
-            too slow, or too fast, to be measured.
+        Union[int, None]
+            Estimated number of pulses, or 0 if the signal cannot be measured.
+            Return None if block is False.
 
         Raises
         ------
         ValueError if the interval is negative.
         """
+        if isinstance(timeout, bool):
+            # The original API used the third argument as the blocking flag.
+            block, timeout = timeout, 1
         if interval < 0:
             raise ValueError("Interval cannot be negative.")
 
+        self._pulse_count_capture = None
+        started = time.monotonic()
         tmp = self._channel_one_map
         self._channel_one_map = channel
         try:
             timestamps = self.capture(
-                channel, 2, modes=["sixteen rising"], timeout=timeout
-            )[0]
+                channel, 2, modes=["sixteen rising"], block=block, timeout=timeout
+            )
         finally:
             self._channel_one_map = tmp
 
+        if not block:
+            self._pulse_count_capture = (channel, started)
+            return None
+
+        return self._count_pulses_from_timestamps(timestamps[0], interval)
+
+    def fetch_pulse_count(self) -> int:
+        """Estimate pulses since starting a nonblocking pulse count.
+
+        The estimate uses the measured period and elapsed time, not a firmware
+        counter. Fetching does not wait for another event or stop the capture.
+        The signal must remain periodic, and another capture invalidates the
+        pending pulse count. This method cannot run alongside the oscilloscope.
+
+        Returns
+        -------
+        int
+            Estimated pulse count, or 0 if two distinct events are unavailable.
+
+        Raises
+        ------
+        RuntimeError
+            If no nonblocking pulse count is active.
+        """
+        if self._pulse_count_capture is None:
+            raise RuntimeError("No nonblocking pulse count is active.")
+
+        channel, started = self._pulse_count_capture
+        tmp = self._channel_one_map
+        self._channel_one_map = channel
+        try:
+            timestamps = self.fetch_data()[0]
+        finally:
+            self._channel_one_map = tmp
+
+        return self._count_pulses_from_timestamps(
+            timestamps, time.monotonic() - started
+        )
+
+    @staticmethod
+    def _count_pulses_from_timestamps(timestamps: np.ndarray, interval: float) -> int:
         try:
             # Sixteen rising edges are captured, so the time between two
             # captured events covers 16 periods of the signal.
@@ -785,6 +842,7 @@ class LogicAnalyzer(ADCBufferMixin):
         self._prescaler = 0
 
     def _invalidate_buffer(self):
+        self._pulse_count_capture = None
         for c in self._channels.values():
             c.events_in_buffer = 0
             c.buffer_idx = None
