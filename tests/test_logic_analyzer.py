@@ -16,6 +16,7 @@ import pytest
 
 import pslab.protocol as CP
 from pslab.instrument.logic_analyzer import LogicAnalyzer
+from pslab.instrument.oscilloscope import Oscilloscope
 from pslab.instrument.waveform_generator import PWMGenerator
 
 EVENTS = 2495
@@ -463,6 +464,47 @@ def test_another_capture_invalidates_the_pending_pulse_count(mocker):
 
     with pytest.raises(RuntimeError, match="No nonblocking pulse count is active"):
         la.fetch_pulse_count()
+
+
+@pytest.mark.parametrize(
+    "writer",
+    ["same_fill", "other_fill", "clear", "logic_capture", "scope_capture"],
+)
+def test_buffer_writer_invalidates_pending_pulse_count(mocker, writer):
+    device = FakeDevice()
+    la = LogicAnalyzer(device)
+    la.count_pulses("LA2", block=False)
+    fetch = mocker.patch.object(la, "fetch_data", return_value=[np.array([0, 160])])
+
+    if writer == "same_fill":
+        la.fill_buffer([1, 2])
+    elif writer == "other_fill":
+        LogicAnalyzer(device).fill_buffer([1, 2])
+    elif writer == "clear":
+        LogicAnalyzer(device).clear_buffer(2)
+    elif writer == "logic_capture":
+        LogicAnalyzer(device).capture("LA3", 2, block=False)
+    else:
+        Oscilloscope(device).capture(1, samples=2, timegap=2, block=False)
+
+    with pytest.raises(RuntimeError, match="No nonblocking pulse count is active"):
+        la.fetch_pulse_count()
+    fetch.assert_not_called()
+
+
+def test_pulse_count_fetch_keeps_the_original_buffer(mocker):
+    la = LogicAnalyzer(FakeDevice())
+    mocker.patch(
+        "pslab.instrument.logic_analyzer.time.monotonic", side_effect=[1, 2, 3]
+    )
+    la.count_pulses("LA2", block=False)
+    mocker.patch.object(la, "fetch_data", return_value=[np.array([0, 160])])
+
+    la.fill_buffer([])
+    LogicAnalyzer(FakeDevice()).fill_buffer([1, 2])
+
+    assert la.fetch_pulse_count() == 100_000
+    assert la.fetch_pulse_count() == 200_000
 
 
 def test_count_pulses_across_a_counter_rollover(mocker):

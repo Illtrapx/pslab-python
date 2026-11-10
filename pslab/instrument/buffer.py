@@ -6,6 +6,16 @@ import pslab.protocol as CP
 class ADCBufferMixin:
     """Mixin for classes that need to read or write to the ADC buffer."""
 
+    @property
+    def _buffer_owner(self) -> object | None:
+        return getattr(self._device, "_adc_buffer_owner", None)
+
+    def _claim_buffer(self) -> object:
+        # Instruments on the same connection share the hardware buffer.
+        owner = object()
+        self._device._adc_buffer_owner = owner
+        return owner
+
     def fetch_buffer(self, samples: int, starting_position: int = 0):
         """Fetch a section of the ADC buffer.
 
@@ -51,6 +61,8 @@ class ADCBufferMixin:
             Location in the ADC buffer to start from. By default samples will
             be cleared from the beginning of the buffer.
         """
+        if samples > 0:
+            self._claim_buffer()
         self._device.send_byte(CP.COMMON)
         self._device.send_byte(CP.CLEAR_BUFFER)
         self._device.send_int(starting_position)
@@ -71,8 +83,8 @@ class ADCBufferMixin:
         buf_size = 128
         idx = starting_position
         remaining = len(data)
-
         while remaining > 0:
+            self._claim_buffer()
             self._device.send_byte(CP.COMMON)
             self._device.send_byte(CP.FILL_BUFFER)
             self._device.send_int(idx)

@@ -189,6 +189,7 @@ class Oscilloscope(ADCBufferMixin):
         self._invalidate_buffer()
         chosa = self._channels[self._channel_one_map].chosa
         self._channels[self._channel_one_map].resolution = 10
+        self._claim_buffer()
         self._device.send_byte(CP.ADC)
 
         CH123SA = 0  # TODO what is this?

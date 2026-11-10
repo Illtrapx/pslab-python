@@ -59,6 +59,7 @@ class LogicAnalyzer(ADCBufferMixin):
         self._channel_two_map = "LA2"
         self._trimmed = 0
         self._pulse_count_capture = None
+        self._capture_buffer_owner = None
 
     def measure_frequency(
         self, channel: str, simultaneous_oscilloscope: bool = False, timeout: float = 1
@@ -327,6 +328,7 @@ class LogicAnalyzer(ADCBufferMixin):
             c.buffer_idx = 2500 * e * (1 if c.datatype == "int" else 2)
             c._logic_mode = modes[e]
 
+        self._capture_buffer_owner = self._claim_buffer()
         if channels == 1:
             self._capture_one()
         elif channels == 2:
@@ -773,7 +775,7 @@ class LogicAnalyzer(ADCBufferMixin):
             self._channel_one_map = tmp
 
         if not block:
-            self._pulse_count_capture = (channel, started)
+            self._pulse_count_capture = (channel, started, self._capture_buffer_owner)
             return None
 
         return self._count_pulses_from_timestamps(timestamps[0], interval)
@@ -783,8 +785,9 @@ class LogicAnalyzer(ADCBufferMixin):
 
         The estimate uses the measured period and elapsed time, not a firmware
         counter. Fetching does not wait for another event or stop the capture.
-        The signal must remain periodic, and another capture invalidates the
-        pending pulse count. This method cannot run alongside the oscilloscope.
+        The signal must remain periodic. Writing to the shared sample buffer
+        invalidates the pending pulse count. This method cannot run alongside
+        the oscilloscope.
 
         Returns
         -------
@@ -799,7 +802,11 @@ class LogicAnalyzer(ADCBufferMixin):
         if self._pulse_count_capture is None:
             raise RuntimeError("No nonblocking pulse count is active.")
 
-        channel, started = self._pulse_count_capture
+        channel, started, owner = self._pulse_count_capture
+        if owner is not self._buffer_owner:
+            self._pulse_count_capture = None
+            raise RuntimeError("No nonblocking pulse count is active.")
+
         tmp = self._channel_one_map
         self._channel_one_map = channel
         try:
@@ -831,6 +838,7 @@ class LogicAnalyzer(ADCBufferMixin):
         return int(round(interval / period))
 
     def _reset_prescaler(self):
+        self._claim_buffer()
         self._device.send_byte(CP.TIMING)
         self._device.send_byte(CP.START_FOUR_CHAN_LA)
         self._device.send_int(0)
